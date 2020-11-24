@@ -68,7 +68,7 @@ int dump_memory(uint64_t dump_start_addr, uint32_t dump_size, char * filename)
 	page_num = (uint32_t)( (size_t)(dump_size)/page_size ) + 1 ;
 
 
-	ptr = mmap(NULL,  page_num*page_size, PROT_READ|PROT_WRITE, MAP_SHARED, mem_fd, dump_start_addr);
+	ptr = (uint32_t *)mmap(NULL,  page_num*page_size, PROT_READ|PROT_WRITE, MAP_SHARED, mem_fd, dump_start_addr);
 
 	if ( ptr == MAP_FAILED )
 	{
@@ -120,7 +120,7 @@ int fill_memory(uint64_t start_addr, uint32_t size, uint32_t pattern)
 	page_num = (size_t)(size)/page_size + 1;
 
 
-	ptr = mmap(NULL,  page_num*page_size, PROT_READ|PROT_WRITE, MAP_SHARED, mem_fd, start_addr);
+	ptr = (uint32_t *)mmap(NULL,  page_num*page_size, PROT_READ|PROT_WRITE, MAP_SHARED, mem_fd, start_addr);
 
 	if ( ptr == MAP_FAILED )
 	{
