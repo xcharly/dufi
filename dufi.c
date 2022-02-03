@@ -25,11 +25,16 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
-
+#include <sys/ioctl.h>
 #include <fcntl.h>
 #include <unistd.h>
 
 #include <getopt.h>
+
+#include <errno.h>
+
+#include "mad_ioctl.h"
+
 
 /* Global variables */
 static uint32_t page_size; /* Page size */
@@ -138,6 +143,67 @@ int fill_memory(uint64_t start_addr, uint32_t size, uint32_t pattern)
 	return 1;
 }
 
+int drv_mem_alloc(long int block_size)
+{
+	/* Memory won't be unmapped */
+
+	void * p_virtadd = 0;
+	int ret = 0;
+    int fd = 0;
+
+	struct mad_mo mo;
+
+	fd = open("/dev/"MAD_DEV_FILENAME, O_RDWR | O_SYNC, 0);
+	printf("%d\n", fd);
+
+
+    if ( fd < 0 )
+    {
+        printf("Cannot open device file: %s\n", MAD_DEV_FILENAME);
+        return -1;
+    }
+
+    /* Test ioctl */
+    mo.size = block_size;
+    /* Align for page size */
+    if ( mo.size % page_size )
+    {
+        mo.size = (mo.size/page_size) * page_size + page_size;
+    }
+
+
+    ret = ioctl(fd, MAD_IOCTL_MALLOC, (struct mad_mo *) &mo);
+
+    if ( ret < 0 )
+    {
+        printf("ioctl MAD_IOCTL_MALLOC failed: %d\n", ret);
+        return -1;
+    }
+
+    //p_virtadd = (uint64_t)mo.virtaddr;
+
+    //printf("KERNEL MODE: Reserved at phyaddr 0x%lx, virtadd 0x%lx, size 0x%lx\n", mo.phyaddr, p_virtadd, mo.size);
+
+    /* At this point, we have reserved physical memory accessible by the virtual memory
+       pointer p_virtadd but only in kernel mode.
+       Memory remapping is required to have this memory accesible in user land.
+    */
+    //p_virtadd[0] = 0xcafebabe; /* Guaranteed segfault */
+
+    p_virtadd = mmap(NULL, mo.size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, mo.phyaddr);
+
+    if ( MAP_FAILED == p_virtadd ) 
+    {
+		printf("mmap failed errno: %d %s\n", errno, strerror(errno));
+        ioctl(fd, MAD_IOCTL_FREE, &mo);
+        close(fd);
+        return -1;        
+    }
+    printf("USER LAND: Reserved at phyaddr 0x%lx, virtadd 0x%lx, size 0x%lx\n", mo.phyaddr, (uint32_t *)p_virtadd, mo.size);
+
+	return 1;
+}
+
 
 int main(int argc, char** argv){
 	int opt = 0;
@@ -145,12 +211,13 @@ int main(int argc, char** argv){
 	 page_size = sysconf(_SC_PAGESIZE);
 
 	/* Options definition */
-	const char    * short_opt = "hd:f:"; //: to specify a flag that requires an argument
+	const char    * short_opt = "hd:f:m:"; //: to specify a flag that requires an argument
 	struct option   long_opt[] =
 	{
 	  {"help",          no_argument, NULL, 'h'},
 	  {"dump",          required_argument, NULL, 'd'},
 	  {"fill",          required_argument, NULL, 'f'},
+	  {"dma",          required_argument, NULL, 'm'},
 	  {NULL,            0,           NULL, 0  }
 	};
 
@@ -189,6 +256,12 @@ int main(int argc, char** argv){
 			pattern = strtoul(optarg, NULL, 16);
 			printf("Filling memory from 0x%llx with size 0x%llx writing 0x%lx\n", start_addr, size, pattern);
 			return fill_memory(start_addr, size, pattern);
+		 	break;
+
+		 case 'm': /* DMA allocation */
+		 	size = strtoull(argv[2], NULL, 16);
+			printf("MAD Driver allocating size 0x%x\n", size);
+			return drv_mem_alloc(size);
 		 	break;
 
 		 case 'h':
