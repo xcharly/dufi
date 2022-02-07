@@ -28,9 +28,7 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <unistd.h>
-
 #include <getopt.h>
-
 #include <errno.h>
 
 #include "mad_ioctl.h"
@@ -38,6 +36,7 @@
 
 /* Global variables */
 static uint32_t page_size; /* Page size */
+static int mad_fd; /* MAD driver fd */
 
 /* Functions prototypes */
 void help();
@@ -46,12 +45,19 @@ int fill_memory(uint64_t start_addr, uint32_t size, uint32_t pattern);
 
 void help()
 {
-	printf("Usage: dufi [64-bit start_address] [32-bit size] [-f 32-bit pattern] [-d file.bin]\n");
-	printf("\tstart-address and size in hexadecimal\n");
-	printf("\t-f fills [size] bytes of memory from [start_address] using [pattern]\n");
-	printf("\t-d dumps [size] bytes of memory from [start_address] and write it to a file\n");
+	printf("Usage: dufi [options]\n");
+	printf("options:\n");
+	printf("\tNOTE: start-address and size in hexadecimal\n");
+
+	printf("\t%-15s %-50s %-30s\n", "Options", "Arguments", "Description");
+	printf("\t%-15s %-50s %-30s\n", "-f, --fill", "64-bit-start_address 32-bit-size 32-bit-pattern", "Fills size bytes of memory from start_address with pattern");
+	printf("\t%-15s %-50s %-30s\n", "-d, --dump", "64-bit-start_address 32-bit-size filename", "Dumps size bytes of memory from start_address and writes it in filename");
+	printf("\t%-15s %-50s %-30s\n", "-m, --dma", "32-bit-size", "Allocates size bytes of physical coherent memory (MAD driver required)");
+	printf("\t%-15s %-50s %-30s\n", "-t, --memtest", "32-bit-size iterations", "Allocates size bytes of physical coherent memory and runs iterations of a memory test (MAD driver required)");
+	printf("\t%-15s %-50s %-30s\n", "-h, --help", "", "Print this menu");
 }
 
+/* Dump memory to a file */
 int dump_memory(uint64_t dump_start_addr, uint32_t dump_size, char * filename)
 {
 
@@ -106,6 +112,7 @@ int dump_memory(uint64_t dump_start_addr, uint32_t dump_size, char * filename)
 	return 1;
 }
 
+/* Fill memory with a pattern */
 int fill_memory(uint64_t start_addr, uint32_t size, uint32_t pattern)
 {
 
@@ -143,36 +150,44 @@ int fill_memory(uint64_t start_addr, uint32_t size, uint32_t pattern)
 	return 1;
 }
 
-int drv_mem_alloc(long int block_size)
+/* Free coherent physical memory
+	MAD driver is required  */
+void mad_mem_free(struct mad_mo * mo)
+{
+    ioctl(mad_fd, MAD_IOCTL_FREE, mo);
+    close(mad_fd);
+}
+
+/* Allocate coherent physical memory
+	MAD driver is required */	
+int mad_mem_alloc(uint32_t block_size, struct mad_mo * mo)
 {
 	/* Memory won't be unmapped */
 
 	void * p_virtadd = 0;
 	int ret = 0;
-    int fd = 0;
+    
 
-	struct mad_mo mo;
+	//struct mad_mo mo;
 
-	fd = open("/dev/"MAD_DEV_FILENAME, O_RDWR | O_SYNC, 0);
-	printf("%d\n", fd);
+	mad_fd = open("/dev/"MAD_DEV_FILENAME, O_RDWR | O_SYNC, 0);
 
-
-    if ( fd < 0 )
+    if ( mad_fd < 0 )
     {
         printf("Cannot open device file: %s\n", MAD_DEV_FILENAME);
         return -1;
     }
 
     /* Test ioctl */
-    mo.size = block_size;
+    mo->size = block_size;
     /* Align for page size */
-    if ( mo.size % page_size )
+    if ( mo->size % page_size )
     {
-        mo.size = (mo.size/page_size) * page_size + page_size;
+        mo->size = (mo->size/page_size) * page_size + page_size;
     }
 
 
-    ret = ioctl(fd, MAD_IOCTL_MALLOC, (struct mad_mo *) &mo);
+    ret = ioctl(mad_fd, MAD_IOCTL_MALLOC, (struct mad_mo *) mo); //(struct mad_mo *) &mo
 
     if ( ret < 0 )
     {
@@ -190,42 +205,107 @@ int drv_mem_alloc(long int block_size)
     */
     //p_virtadd[0] = 0xcafebabe; /* Guaranteed segfault */
 
-    p_virtadd = mmap(NULL, mo.size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, mo.phyaddr);
+    mo->virtaddr = mmap(NULL, mo->size, PROT_READ|PROT_WRITE, MAP_SHARED, mad_fd, mo->phyaddr);
 
-    if ( MAP_FAILED == p_virtadd ) 
+    if ( MAP_FAILED == mo->virtaddr ) 
     {
 		printf("mmap failed errno: %d %s\n", errno, strerror(errno));
-        ioctl(fd, MAD_IOCTL_FREE, &mo);
-        close(fd);
+        ioctl(mad_fd, MAD_IOCTL_FREE, mo);
+        close(mad_fd);
         return -1;        
     }
-    printf("USER LAND: Reserved at phyaddr 0x%lx, virtadd 0x%lx, size 0x%lx\n", mo.phyaddr, (uint32_t *)p_virtadd, mo.size);
+
+    //printf("USER LAND: Reserved at phyaddr 0x%lx, virtadd 0x%lx, size 0x%lx\n", mo->phyaddr, (uint32_t *)(mo->virtadd), mo->size);
+	return 1;
+}
+
+/* Memory write test */
+int mem_test(struct mad_mo * mo, uint32_t size)
+{
+	uint32_t offset = 0;
+	uint32_t word = 0;
+	uint32_t nwords = size/sizeof(word);
+
+	/* Fill memory */
+	for ( offset = 0; offset < nwords; offset++ )
+	{
+		*( (uint32_t *)mo->virtaddr + offset ) = word;
+		word++;
+	}
+
+	word = 0;
+
+	/* Check each position */
+	for ( offset = 0; offset < nwords; offset++ )
+	{
+		if ( *( (uint32_t *)mo->virtaddr + offset ) != word )
+		{
+			return -1; /* Memory check error */
+		}
+		word++;
+	}
 
 	return 1;
 }
 
+/* Memory stress test */
+int mem_stress_test(uint32_t size, uint32_t iter)
+{
+	struct mad_mo mo;
+	int ret = 0;
+	int i = 0;
+
+	/* Allocate physical coherent memory */
+	ret = mad_mem_alloc(size, &mo);
+	if ( 1 == ret )
+	{
+		printf("Reserved at phyaddr 0x%x, virtadd 0x%x, size 0x%x\n", mo.phyaddr, (uint32_t *)(mo.virtaddr), mo.size);
+	}
+	else
+	{
+		return -2;
+	}
+
+	/* Do mem test */
+	for ( i; i < iter; i++ )
+	{
+		ret = mem_test(&mo, size);
+		fprintf(stderr, "."); /* Print immediatly */
+		if ( ret < 0 )
+		{
+			mad_mem_free(&mo);
+			return -1;
+		}
+	}
+	
+	/* Relase memory */
+	mad_mem_free(&mo);
+	return 1;
+}
 
 int main(int argc, char** argv){
 	int opt = 0;
+	int ret = 0;
 
-	 page_size = sysconf(_SC_PAGESIZE);
+	page_size = sysconf(_SC_PAGESIZE);
 
 	/* Options definition */
-	const char    * short_opt = "hd:f:m:"; //: to specify a flag that requires an argument
+	const char    * short_opt = "hd:f:m:s:"; //: to specify a flag that requires an argument
 	struct option   long_opt[] =
 	{
 	  {"help",          no_argument, NULL, 'h'},
 	  {"dump",          required_argument, NULL, 'd'},
 	  {"fill",          required_argument, NULL, 'f'},
 	  {"dma",          required_argument, NULL, 'm'},
+	  {"memtest",    required_argument, NULL, 't'},
 	  {NULL,            0,           NULL, 0  }
 	};
 
     uint64_t start_addr = 0; /* Start address */
     uint32_t size = 0; /* Size */
 	uint32_t pattern = 0; /* Filling pattern */
+	uint32_t iter = 0; /* Iterations */
     char filename[25];
-
 
     /* Check arguments */
 	if ( argc < 2 )
@@ -238,54 +318,63 @@ int main(int argc, char** argv){
 	{
 	  switch(opt)
 	  {
-		 case -1:       /* no more arguments */
-		 case 0:        /* long options toggles */
+		case -1:       /* no more arguments */
+		case 0:        /* long options toggles */
 			break;
 
-		 case 'd': /* Dump memory */
+		case 'd': /* Dump memory */
 			strncpy(filename, optarg, strlen(optarg) + 1); /* Filename */
 			start_addr = strtoull(argv[1], NULL, 16);
-		 	size = strtoull(argv[2], NULL, 16);
+			size = strtoull(argv[2], NULL, 16);
 			printf("Dumping memory from 0x%llx with size 0x%llx\n", start_addr, size);
 			return dump_memory(start_addr, size, filename);
 			break;
 
-		 case 'f': /* Fill memory */
+		case 'f': /* Fill memory */
 			start_addr = strtoull(argv[1], NULL, 16);
-		 	size = strtoull(argv[2], NULL, 16);
+			size = strtoull(argv[2], NULL, 16);
 			pattern = strtoul(optarg, NULL, 16);
 			printf("Filling memory from 0x%llx with size 0x%llx writing 0x%lx\n", start_addr, size, pattern);
 			return fill_memory(start_addr, size, pattern);
-		 	break;
+			break;
 
-		 case 'm': /* DMA allocation */
-		 	size = strtoull(argv[2], NULL, 16);
+		case 'm': /* DMA allocation */
+			size = strtoull(argv[2], NULL, 16);
 			printf("MAD Driver allocating size 0x%x\n", size);
-			return drv_mem_alloc(size);
-		 	break;
+			struct mad_mo mo;
+			return mad_mem_alloc(size, &mo);
+			break;
 
-		 case 'h':
+		case 's': /* Memory stress test */
+			size = strtoull(argv[2], NULL, 16);
+			iter = strtoull(argv[3], NULL, 10);
+			printf("Starting memtest for %d iterations on size 0x%x\n", iter, size);
+			ret = mem_stress_test(size, iter);
+			if ( ret < 0 )
+			{
+				printf("Memory test ended with errors.\n");
+			}
+			else
+			{
+				printf("Memory test OK\n");
+			}
+			break;
+
+		case 'h':
 			help();
 			return(0);
 
-		 case ':':
-		 case '?':
+		case ':':
+		case '?':
 			printf("Try `%s --help' for more information.\n", argv[0]);
 			return(-2);
 
-		 default:
+		default:
 			printf("%s: invalid option -- %c\n", argv[0], opt);
 			printf("Try `%s --help' for more information.\n", argv[0]);
 			return(-2);
-	  };
 	};
-
-
-	/* Arguments not parsed by getops */
-    /*for(; optind < argc; optind++){
-		 start_addr = strtoull(argv[1], NULL, 16);
-		 size = strtoull(argv[2], NULL, 16);
-    }*/
+	};
 
 	return 1;
 }
