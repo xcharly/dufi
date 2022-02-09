@@ -55,6 +55,7 @@ void help()
     printf("\t%-15s %-50s %-30s\n", "-d, --dump", "64-bit-start_address 32-bit-size filename", "Dumps size bytes of memory from start_address and writes it in filename");
     printf("\t%-15s %-50s %-30s\n", "-m, --dma", "32-bit-size", "Allocates size bytes of physical coherent memory (MAD driver required)");
     printf("\t%-15s %-50s %-30s\n", "-t, --memtest", "32-bit-size iterations", "Allocates size bytes of physical coherent memory and runs iterations of a memory test (MAD driver required)");
+    printf("\t%-15s %-50s %-30s\n", "-p, --page", "", "Print memory page size");
     printf("\t%-15s %-50s %-30s\n", "-h, --help", "", "Print this menu");
 }
 
@@ -261,21 +262,22 @@ int mem_test(struct mad_mo *mo, uint32_t size)
     /*Fill memory */
     for (offset = 0; offset< nwords; offset++)
     {
-        *((uint32_t*) mo->virtaddr + offset) = word;
-        word++;
+        //*( (uint32_t*) mo->virtaddr + offset) = word;
+        ((uint32_t*) mo->virtaddr)[offset] = 0xdeadbeef;
+        //word++;
     }
 
-    word = 0;
+    //word = 0;
 
     /*Check each position */
-    for (offset = 0; offset< nwords; offset++)
-    {
-        if (*((uint32_t*) mo->virtaddr + offset) != word)
-        {
-            return -1; /*Memory check error */
-        }
-        word++;
-    }
+   // for (offset = 0; offset< nwords; offset++)
+   // {
+   //     if (*((uint32_t*) mo->virtaddr + offset) != word)
+   //     {
+    //        return -1; /*Memory check error */
+    //    }
+    //    word++;
+   // }
 
     return 1;
 }
@@ -300,7 +302,7 @@ int mem_stress_test(uint32_t size, uint32_t iter)
     ret = mad_mem_alloc(size, &mo);
     if (1 == ret)
     {
-        printf("Reserved at phyaddr 0x%lx, virtadd 0x%ls, size 0x%lx\n", mo.phyaddr, (uint32_t*)(mo.virtaddr), mo.size);
+        printf("Reserved at phyaddr 0x%lx, virtadd 0x%lx, size 0x%lx\n", mo.phyaddr, (uint32_t*)(mo.virtaddr), mo.size);
     }
     else
     {
@@ -311,12 +313,18 @@ int mem_stress_test(uint32_t size, uint32_t iter)
     for (i = 0; i < iter; i++)
     {
         ret = mem_test(&mo, size);
-        fprintf(stderr, "."); /* Print immediatly */
-        if (ret < 0)
+        //fprintf(stderr, "."); /* Print immediatly */
+        printf("."); fflush(stdout);
+        if( i%100 == 0 )
         {
-            mad_mem_free(&mo);
-            return -1;
+            printf("\n");fflush(stdout);
         }
+        //fflush(stdout);
+        //if (ret < 0)
+        //{
+        //    mad_mem_free(&mo);
+        //    return -1;
+        //}
     }
 
     /*Relase memory */
@@ -336,7 +344,7 @@ int main(int argc, char **argv)
     page_size = sysconf(_SC_PAGESIZE);
 
     /*Options definition */
-    const char *short_opt = "hd:f:m:s:";	//: to specify a flag that requires an argument
+    const char *short_opt = "hd:f:m:t:p";	//: to specify a flag that requires an argument
     struct option long_opt[] = {
 		{
             "help",
@@ -363,6 +371,11 @@ int main(int argc, char **argv)
             required_argument,
             NULL,
             't' },
+        {
+            "page",
+            no_argument,
+            NULL,
+            'p' },
         {
             NULL,
             0,
@@ -405,9 +418,9 @@ int main(int argc, char **argv)
 
             case 'f':
                 /*Fill memory */
-                start_addr = strtoull(argv[1], NULL, 16);
-                size = strtoull(argv[2], NULL, 16);
-                pattern = strtoul(optarg, NULL, 16);
+                start_addr = strtoull(argv[2], NULL, 16);
+                size = strtoull(argv[3], NULL, 16);
+                pattern = strtoul(argv[4], NULL, 16);
                 printf("Filling memory from 0x%lx with size 0x%x writing 0x%x\n", start_addr, size, pattern);
                 return fill_memory(start_addr, size, pattern);
                 break;
@@ -417,10 +430,16 @@ int main(int argc, char **argv)
                 size = strtoull(argv[2], NULL, 16);
                 printf("MAD Driver allocating size 0x%x\n", size);
                 struct mad_mo mo;
-                return mad_mem_alloc(size, &mo);
+                ret = mad_mem_alloc(size, &mo);
+                if ( ret < 0 )
+                {
+                    printf("Error allocating coherent memory.\n");
+                    return -1;
+                }
+                printf("Allocated coherent memory size 0x%lx at 0x%lx\n", mo.size, mo.phyaddr);
                 break;
 
-            case 's':
+            case 't':
                 /*Memory stress test */
                 size = strtoull(argv[2], NULL, 16);
                 iter = strtoull(argv[3], NULL, 10);
@@ -434,6 +453,11 @@ int main(int argc, char **argv)
                 {
                     printf("Memory test OK\n");
                 }
+                break;
+
+            case 'p':
+                /*Print page size */
+                printf("Page size is 0x%x\n", page_size);
                 break;
 
             case 'h':
